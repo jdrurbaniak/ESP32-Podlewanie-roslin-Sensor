@@ -46,7 +46,7 @@ struct_incoming_message inData;
 struct_pairing pairingData;
 
 enum PairingStatus {NOT_PAIRED, PAIR_REQUEST, PAIR_REQUESTED, PAIR_PAIRED,};
-PairingStatus pairingStatus = NOT_PAIRED;
+RTC_DATA_ATTR PairingStatus pairingStatus = NOT_PAIRED;
 
 enum MessageType {PAIRING, DATA,};
 MessageType messageType;
@@ -54,14 +54,16 @@ MessageType messageType;
 #ifdef SAVE_CHANNEL
   int lastChannel;
 #endif  
-int channel = 1;
+RTC_DATA_ATTR int channel = 1;
  
 float h = 0.0;
 
 unsigned long currentMillis = millis();
 unsigned long previousMillis = 0;   // Stores last time temperature was published
+unsigned int deepSleepDelay = 5000;
+bool isDeepSleepScheduled = false;
 const long interval = 1800000;        // Interval at which to publish sensor readings - 30min
-bool isReportRateIncreased = true; // Kiedy dopiero co podlaliśmy roślinę 
+RTC_DATA_ATTR bool isReportRateIncreased = false; // Kiedy dopiero co podlaliśmy roślinę 
 // #define NO_PUMP
 #ifdef NO_PUMP
   const long increasedReportRate = interval;
@@ -74,8 +76,8 @@ const float numberOfReadings = 10.0;
 unsigned long start;                // used to measure Pairing time
 unsigned int readingId = 0;   
 int wateringDurationMs = 1000;
-float moistureTresholdPercentage = 50.0;
-float maximumMoistureLevel = 55.0;
+RTC_DATA_ATTR float moistureTresholdPercentage = 50.0;
+RTC_DATA_ATTR float maximumMoistureLevel = 55.0;
 
 const float HumidityAirValue = 2650.0;
 const float HumidityWaterValue = 1400.0;
@@ -176,6 +178,8 @@ void OnDataSent(const uint8_t *mac_addr, esp_now_send_status_t status) {
   Serial.println(status == ESP_NOW_SEND_SUCCESS ? "Delivery Success" : "Delivery Fail");
 }
 
+long currentInterval;
+
 void OnDataRecv(const uint8_t * mac_addr, const uint8_t *incomingData, int len) { 
   Serial.print("Packet received from: ");
   printMAC(mac_addr);
@@ -192,6 +196,9 @@ void OnDataRecv(const uint8_t * mac_addr, const uint8_t *incomingData, int len) 
     Serial.print("SetPoint maxiumumMoistureLevel = ");
     Serial.println(inData.maximumMoistureLevel);
     maximumMoistureLevel = inData.maximumMoistureLevel;
+    Serial.println("Going to sleep");
+    esp_sleep_enable_timer_wakeup(currentInterval*1000);
+    esp_deep_sleep_start();
     break;
 
   case PAIRING:    // we received pairing data from server
@@ -216,6 +223,9 @@ void OnDataRecv(const uint8_t * mac_addr, const uint8_t *incomingData, int len) 
     break;
   }  
 }
+
+const uint8_t maxPairingAttempts = 5;
+int pairingAttempts = 0;
 
 PairingStatus autoPairing(){
   switch(pairingStatus) {
@@ -254,6 +264,7 @@ PairingStatus autoPairing(){
       channel ++;
       if (channel > MAX_CHANNEL){
          channel = 1;
+         pairingAttempts++;
       }   
       pairingStatus = PAIR_REQUEST;
     }
@@ -269,6 +280,12 @@ PairingStatus autoPairing(){
 void setup() {
   Serial.begin(115200);
   Serial.println();
+  Serial.print("RTC pairingStatus: ");
+  Serial.println(pairingStatus);
+  Serial.print("RTC channel: ");
+  Serial.println(channel);
+  Serial.print("RTC isReportRateIncreased: ");
+  Serial.println(isReportRateIncreased);
   pinMode(WATER_PUMP_PIN, OUTPUT);
   digitalWrite(WATER_PUMP_PIN, LOW);
   digitalWrite(WATER_PUMP_PIN, HIGH);
@@ -290,35 +307,61 @@ void setup() {
   pairingStatus = PAIR_REQUEST;
 }  
 
-long currentInterval;
-
 void loop() {
-  if (autoPairing() == PAIR_PAIRED) {
+  if(isDeepSleepScheduled == false)
+  {
+    if (autoPairing() == PAIR_PAIRED || pairingAttempts > maxPairingAttempts) {
+      // unsigned long currentMillis = millis();
+      currentInterval = (isReportRateIncreased == true) ? increasedReportRate : interval;
+      // if (currentMillis - previousMillis >= currentInterval) {
+        // Save the last time a new reading was published
+        //previousMillis = currentMillis;
+        //Set values to send
+        
+        myData.msgType = DATA;
+        myData.id = BOARD_ID;
+        myData.humidity = readHumidity();
+        myData.readingId = readingId++;
+        if(myData.humidity < moistureTresholdPercentage)
+        {
+          isReportRateIncreased = true;
+          if(myData.humidity != 0)
+          waterPlant(wateringDurationMs, WATER_PUMP_PIN);
+        }
+        else if(myData.humidity >= maximumMoistureLevel)
+        {
+          isReportRateIncreased = false;
+        }
+        else if(isReportRateIncreased == true)
+        {
+          waterPlant(wateringDurationMs, WATER_PUMP_PIN);
+        }
+        esp_err_t result = esp_now_send(serverAddress, (uint8_t *) &myData, sizeof(myData));
+        if(result == ESP_OK && pairingStatus == PAIR_PAIRED)
+        {
+          Serial.print("Waiting for data for ");
+          Serial.print(deepSleepDelay);
+          Serial.println("ms");
+          isDeepSleepScheduled = true;
+          previousMillis = millis();
+        }
+        else
+        {
+          Serial.println("Going to sleep");
+          esp_sleep_enable_timer_wakeup(currentInterval*1000);
+          esp_deep_sleep_start();
+        }
+      // }
+    }
+  }
+  else
+  {
     unsigned long currentMillis = millis();
-    currentInterval = (isReportRateIncreased == true) ? increasedReportRate : interval;
-    if (currentMillis - previousMillis >= currentInterval) {
-      // Save the last time a new reading was published
-      previousMillis = currentMillis;
-      //Set values to send
-      myData.msgType = DATA;
-      myData.id = BOARD_ID;
-      myData.humidity = readHumidity();
-      myData.readingId = readingId++;
-      esp_err_t result = esp_now_send(serverAddress, (uint8_t *) &myData, sizeof(myData));
-      if(myData.humidity < moistureTresholdPercentage)
-      {
-        if(myData.humidity != 0)
-        waterPlant(wateringDurationMs, WATER_PUMP_PIN);
-        isReportRateIncreased = true;
-      }
-      else if(myData.humidity >= maximumMoistureLevel)
-      {
-        isReportRateIncreased = false;
-      }
-      else
-      {
-        waterPlant(wateringDurationMs, WATER_PUMP_PIN);
-      }
+    if(currentMillis - previousMillis >= deepSleepDelay)
+    {
+      Serial.println("Going to sleep");
+      esp_sleep_enable_timer_wakeup(currentInterval*1000);
+      esp_deep_sleep_start();
     }
   }
 }
