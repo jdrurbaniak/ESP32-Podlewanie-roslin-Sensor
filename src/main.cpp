@@ -1,10 +1,4 @@
-/*
-  Rui Santos
-  Complete project details at https://RandomNerdTutorials.com/?s=esp-now
-  Permission is hereby granted, free of charge, to any person obtaining a copy of this software and associated documentation files.
-  The above copyright notice and this permission notice shall be included in all copies or substantial portions of the Software.
-  Based on JC Servaye example: https://github.com/Servayejc/esp_now_sender/
-*/
+// Based on JC Servaye example: https://github.com/Servayejc/esp_now_sender/
 
 #include <Arduino.h>
 #include <esp_now.h>
@@ -13,9 +7,7 @@
 #include <EEPROM.h>
 #include <vector>
 
-// Set your Board and Server ID 
-#define BOARD_ID 2
-#define MAX_CHANNEL 13  // for North America // 13 in Europe
+#define MAX_CHANNEL 13
 #define MOISTURE_SENSOR_PIN 32
 #define WATER_PUMP_PIN 25
 
@@ -23,9 +15,7 @@ uint8_t serverAddress[] = {0xFF,0xFF,0xFF,0xFF,0xFF,0xFF};
 
 typedef struct struct_outgoing_message {
   uint8_t msgType;
-  uint8_t id;
   float humidity;
-  unsigned int readingId;
 } struct_outgoing_message;
 
 typedef struct struct_incoming_message {
@@ -34,9 +24,8 @@ typedef struct struct_incoming_message {
   float maximumMoistureLevel;
 } struct_incoming_message;
 
-typedef struct struct_pairing {       // new structure for pairing
+typedef struct struct_pairing {
     uint8_t msgType;
-    uint8_t id;
     uint8_t macAddr[6];
     uint8_t channel;
 } struct_pairing;
@@ -68,14 +57,12 @@ RTC_DATA_ATTR bool isReportRateIncreased = false; // Kiedy dopiero co podlaliśm
 #ifdef NO_PUMP
   const long increasedReportRate = interval;
 #else
-  const long increasedReportRate = 60000; // 1 min
+  const long increasedReportRate = 1200000; // 20 min
 #endif
 
 const int delayBetweenReadings = 10;
 const float numberOfReadings = 10.0;
-unsigned long start;                // used to measure Pairing time
-unsigned int readingId = 0;   
-int wateringDurationMs = 1000;
+int wateringDurationMs = 3000;
 RTC_DATA_ATTR float moistureTresholdPercentage = 50.0;
 RTC_DATA_ATTR float maximumMoistureLevel = 55.0;
 
@@ -181,19 +168,17 @@ void OnDataSent(const uint8_t *mac_addr, esp_now_send_status_t status) {
 long currentInterval;
 
 void OnDataRecv(const uint8_t * mac_addr, const uint8_t *incomingData, int len) { 
-  Serial.print("Packet received from: ");
+  Serial.print("Received data from ");
   printMAC(mac_addr);
   Serial.println();
-  Serial.print("data size = ");
-  Serial.println(sizeof(incomingData));
   uint8_t type = incomingData[0];
   switch (type) {
-  case DATA :      // we received data from server
+  case DATA :
     memcpy(&inData, incomingData, sizeof(inData));
-    Serial.print("SetPoint minimumMoistureLevel = ");
+    Serial.print("minimumMoistureLevel = ");
     Serial.println(inData.minimumMoistureLevel);
     moistureTresholdPercentage = inData.minimumMoistureLevel;
-    Serial.print("SetPoint maxiumumMoistureLevel = ");
+    Serial.print("maxiumumMoistureLevel = ");
     Serial.println(inData.maximumMoistureLevel);
     maximumMoistureLevel = inData.maximumMoistureLevel;
     Serial.println("Going to sleep");
@@ -201,25 +186,20 @@ void OnDataRecv(const uint8_t * mac_addr, const uint8_t *incomingData, int len) 
     esp_deep_sleep_start();
     break;
 
-  case PAIRING:    // we received pairing data from server
+  case PAIRING:
     memcpy(&pairingData, incomingData, sizeof(pairingData));
-    if (pairingData.id == 0) {              // the message comes from server
-      printMAC(mac_addr);
-      Serial.print("Pairing done for ");
-      printMAC(pairingData.macAddr);
-      Serial.print(" on channel " );
-      Serial.print(pairingData.channel);    // channel used by the server
-      Serial.print(" in ");
-      Serial.print(millis()-start);
-      Serial.println("ms");
-      addPeer(pairingData.macAddr, pairingData.channel); // add the server  to the peer list 
-      #ifdef SAVE_CHANNEL
-        lastChannel = pairingData.channel;
-        EEPROM.write(0, pairingData.channel);
-        EEPROM.commit();
-      #endif  
-      pairingStatus = PAIR_PAIRED;             // set the pairing status
-    }
+    printMAC(mac_addr);
+    Serial.println("Paired MAC: ");
+    printMAC(pairingData.macAddr);
+    Serial.print("Channel: " );
+    Serial.print(pairingData.channel);
+    addPeer(pairingData.macAddr, pairingData.channel);
+    #ifdef SAVE_CHANNEL
+      lastChannel = pairingData.channel;
+      EEPROM.write(0, pairingData.channel);
+      EEPROM.commit();
+    #endif  
+    pairingStatus = PAIR_PAIRED;
     break;
   }  
 }
@@ -232,23 +212,18 @@ PairingStatus autoPairing(){
     case PAIR_REQUEST:
     Serial.print("Pairing request on channel "  );
     Serial.println(channel);
-
-    // set WiFi channel   
+  
     ESP_ERROR_CHECK(esp_wifi_set_channel(channel,  WIFI_SECOND_CHAN_NONE));
     if (esp_now_init() != ESP_OK) {
       Serial.println("Error initializing ESP-NOW");
     }
 
-    // set callback routines
     esp_now_register_send_cb(OnDataSent);
     esp_now_register_recv_cb(OnDataRecv);
   
-    // set pairing data to send to the server
     pairingData.msgType = PAIRING;
-    pairingData.id = BOARD_ID;     
     pairingData.channel = channel;
 
-    // add peer and send request
     addPeer(serverAddress, channel);
     esp_now_send(serverAddress, (uint8_t *) &pairingData, sizeof(pairingData));
     previousMillis = millis();
@@ -256,22 +231,19 @@ PairingStatus autoPairing(){
     break;
 
     case PAIR_REQUESTED:
-    // time out to allow receiving response from server
-    currentMillis = millis();
-    if(currentMillis - previousMillis > 250) {
-      previousMillis = currentMillis;
-      // time out expired,  try next channel
-      channel ++;
-      if (channel > MAX_CHANNEL){
-         channel = 1;
-         pairingAttempts++;
-      }   
-      pairingStatus = PAIR_REQUEST;
-    }
+      currentMillis = millis();
+      if(currentMillis - previousMillis > 250) {
+        previousMillis = currentMillis;
+        channel ++;
+        if (channel > MAX_CHANNEL){
+          channel = 1;
+          pairingAttempts++;
+        }   
+        pairingStatus = PAIR_REQUEST;
+      }
     break;
 
     case PAIR_PAIRED:
-      // nothing to do here 
     break;
   }
   return pairingStatus;
@@ -293,7 +265,6 @@ void setup() {
   Serial.println(WiFi.macAddress());
   WiFi.mode(WIFI_STA);
   WiFi.disconnect();
-  start = millis();
 
   #ifdef SAVE_CHANNEL 
     EEPROM.begin(10);
@@ -311,47 +282,39 @@ void loop() {
   if(isDeepSleepScheduled == false)
   {
     if (autoPairing() == PAIR_PAIRED || pairingAttempts > maxPairingAttempts) {
-      // unsigned long currentMillis = millis();
       currentInterval = (isReportRateIncreased == true) ? increasedReportRate : interval;
-      // if (currentMillis - previousMillis >= currentInterval) {
-        // Save the last time a new reading was published
-        //previousMillis = currentMillis;
-        //Set values to send
-        
-        myData.msgType = DATA;
-        myData.id = BOARD_ID;
-        myData.humidity = readHumidity();
-        myData.readingId = readingId++;
-        if(myData.humidity < moistureTresholdPercentage)
-        {
-          isReportRateIncreased = true;
-          if(myData.humidity != 0)
-          waterPlant(wateringDurationMs, WATER_PUMP_PIN);
-        }
-        else if(myData.humidity >= maximumMoistureLevel)
-        {
-          isReportRateIncreased = false;
-        }
-        else if(isReportRateIncreased == true)
-        {
-          waterPlant(wateringDurationMs, WATER_PUMP_PIN);
-        }
-        esp_err_t result = esp_now_send(serverAddress, (uint8_t *) &myData, sizeof(myData));
-        if(result == ESP_OK && pairingStatus == PAIR_PAIRED)
-        {
-          Serial.print("Waiting for data for ");
-          Serial.print(deepSleepDelay);
-          Serial.println("ms");
-          isDeepSleepScheduled = true;
-          previousMillis = millis();
-        }
-        else
-        {
-          Serial.println("Going to sleep");
-          esp_sleep_enable_timer_wakeup(currentInterval*1000);
-          esp_deep_sleep_start();
-        }
-      // }
+      
+      myData.msgType = DATA;
+      myData.humidity = readHumidity();
+      if(myData.humidity < moistureTresholdPercentage)
+      {
+        isReportRateIncreased = true;
+        if(myData.humidity != 0)
+        waterPlant(wateringDurationMs, WATER_PUMP_PIN);
+      }
+      else if(myData.humidity >= maximumMoistureLevel)
+      {
+        isReportRateIncreased = false;
+      }
+      else if(isReportRateIncreased == true)
+      {
+        waterPlant(wateringDurationMs, WATER_PUMP_PIN);
+      }
+      esp_err_t result = esp_now_send(serverAddress, (uint8_t *) &myData, sizeof(myData));
+      if(result == ESP_OK && pairingStatus == PAIR_PAIRED)
+      {
+        Serial.print("Waiting for data for ");
+        Serial.print(deepSleepDelay);
+        Serial.println("ms");
+        isDeepSleepScheduled = true;
+        previousMillis = millis();
+      }
+      else
+      {
+        Serial.println("Going to sleep");
+        esp_sleep_enable_timer_wakeup(currentInterval*1000);
+        esp_deep_sleep_start();
+      }
     }
   }
   else
